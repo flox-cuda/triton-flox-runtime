@@ -1,6 +1,6 @@
 # Triton Inference Server Runtime
 
-Production NVIDIA Triton Inference Server deployment as a Flox environment. Ships with five backends: **Python**, **ONNX Runtime**, **vLLM**, **TensorRT**, and **TensorRT-LLM**. GPU-accelerated multi-port serving (HTTP, gRPC, metrics).
+Production NVIDIA Triton Inference Server deployment as a Flox environment. Ships with four backends: **Python**, **ONNX Runtime**, **vLLM**, and **TensorRT**. GPU-accelerated multi-port serving (HTTP, gRPC, metrics).
 
 - **Triton Inference Server**: v2.66.0 (built from source via Nix)
 - **CUDA**: requires NVIDIA driver with CUDA support
@@ -22,15 +22,19 @@ TRITON_MODEL_BACKEND=onnx \
 
 # Launch with OpenAI-compatible frontend (port 9000)
 TRITON_OPENAI_FRONTEND=true \
-TRITON_OPENAI_TOKENIZER=meta-llama/Llama-3-8B \
-TRITON_MODEL=llama \
-  flox activate --start-services
-
-# Serve a local TRT-LLM model (engine + tokenizer only, ensemble auto-synthesized)
-TRITON_MODEL=my_llm_trtllm \
-TRITON_LOCAL_MODELS=/data/trtllm-models \
+TRITON_MODEL=phi4_mini_instruct \
   flox activate --start-services
 ```
+
+### Default model
+
+By default, `flox activate --start-services` serves **Phi-4-mini-instruct** (`microsoft/Phi-4-mini-instruct`, bfloat16, 3.8B parameters) via the vLLM backend.
+
+- **Auto-downloaded** from [`barstoolbluz/build-hf-models`](https://github.com/barstoolbluz/build-hf-models) GitHub releases on first activation (~7.5 GB)
+- **Stored** in `$FLOX_ENV_CACHE/hf-hub/` in HuggingFace cache layout
+- **Zero network access** after first download — vLLM resolves the model locally via `HF_HUB_CACHE`
+- **Tokenizer** auto-resolved from `model.json` configuration
+- **Override** with `TRITON_MODEL=other_model` to serve a different model
 
 ### Verify it is running
 
@@ -59,19 +63,18 @@ gRPC health checks require `grpcurl` or a gRPC client on port 8001. See the [Tri
 
 | Tool | Description |
 |------|-------------|
-| `triton-infer` | Universal inference CLI -- auto-detects model type (generate vs TRT-LLM) and routes accordingly |
+| `triton-infer` | Universal inference CLI |
 | `triton-chat` | Interactive multi-turn chat REPL via OpenAI-compatible frontend (port 9000) |
 | `triton-test` | Health check, smoke test, and benchmark tool |
 | `examples/openai/` | Chat, streaming, and batch completions via OpenAI SDK |
 | `examples/generate/` | Text generation via Triton's generate extension |
 | `examples/kserve/` | KServe v2 tensor inference (HTTP, gRPC, async) and server metadata |
-| `examples/trtllm/` | TRT-LLM raw tensor inference with client-side HuggingFace tokenization |
 
 ```bash
 cd ~/dev/triton-api-client && flox activate
 
 # Universal inference (auto-detects model type)
-TRITON_MODEL=qwen2_5_05b_trtllm triton-infer "The capital of France is"
+TRITON_MODEL=phi4_mini_instruct triton-infer "The capital of France is"
 
 # Interactive chat (OpenAI frontend, port 9000)
 TRITON_MODEL=my-llm triton-chat
@@ -124,8 +127,6 @@ chained separately.
 │    triton-python-backend        # Python backend .so     │
 │    triton-onnxruntime-backend   # ONNX Runtime backend   │
 │    triton-tensorrt-backend      # TensorRT backend       │
-│    triton-tensorrtllm-backend   # TensorRT-LLM backend   │
-│    triton-model-*               # Model packages (opt.)  │
 │    util-linux                   # flock (preflight)      │
 │    iproute2                     # ss (port scanning)     │
 │    vllm, torch, numpy, ...      # Python ML packages     │
@@ -134,7 +135,7 @@ chained separately.
 │  │  on-activate (flox activate)                       │  │
 │  │    triton-setup-backends  → $FLOX_ENV_CACHE/backends│  │
 │  │    triton-setup-models    → $FLOX_ENV_CACHE/models  │  │
-│  │      (Tier 1/2/3 + TRT-LLM ensemble synthesis)     │  │
+│  │      (Tier 1/2 + GitHub releases model download)   │  │
 │  ├────────────────────────────────────────────────────┤  │
 │  │  triton-resolve-model                              │  │
 │  │    Sources: flox → local → r2 → hf-hub             │  │
@@ -178,34 +179,11 @@ $TRITON_MODEL_REPOSITORY/
 | Backend | Artifact | Notes |
 |---------|----------|-------|
 | `tensorrt` | `model.plan` | Pre-compiled TensorRT engine |
-| `tensorrtllm` | `model` (engine dir) | TensorRT-LLM engine (LLM inference with inflight batching) |
 | `onnx` | `model.onnx` | ONNX Runtime |
 | `pytorch` | `model.pt` | TorchScript model |
 | `tensorflow` | `model.savedmodel/` | Directory; must contain `saved_model.pb` |
 | `python` | `model.py` | Python backend script |
 | `vllm` | `model.json` | vLLM configuration file |
-
-**TRT-LLM model preparation workflow:** TRT-LLM models require a two-stage pipeline
-before they can be served. This runtime handles *serving only* — preparation happens
-in separate environments:
-
-1. **Build engines** ([triton-trtllm-tools](../triton-trtllm-tools/)): Convert
-   HuggingFace models to TRT-LLM engine format using the `tensorrt_llm` Python package
-   (Python 3.12). This produces an `engine/` directory and a `tokenizer/` directory.
-
-2. **Consume engines** (this runtime): Serve the prepared engines via one of two paths:
-
-   - **Direct** — Point `TRITON_LOCAL_MODELS` at a directory containing your engine
-     builds. `triton-setup-models` assembles them as Tier 3 and auto-synthesizes the
-     ensemble pipeline (preprocessing, postprocessing, BLS orchestrator). No packaging
-     step required.
-   - **Packaged** — Build a Nix model package in the
-     [build-trtllm-models](../builds/build-trtllm-models/) repo, publish it to the Flox
-     catalog, and install it in this environment's manifest. The model appears as Tier 1
-     with its ensemble bundled. This path gives you pinned versions, reproducibility, and
-     shared catalog distribution.
-
-The direct path is faster for iteration; the packaged path is better for production.
 
 ### Version directories
 
@@ -251,13 +229,12 @@ TRITON_HTTP_PORT=9000 TRITON_LOG_VERBOSE=1 flox activate --start-services
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRITON_MODEL` | _(required)_ | Model name (directory name within the repository). Controls which model `triton-resolve-model` provisions — does **not** restrict which models tritonserver loads (see `TRITON_MODEL_CONTROL_MODE`). Must not contain `/`, `\`, or be `.`/`..` |
+| `TRITON_MODEL` | `phi4_mini_instruct` | Model name (directory name within the repository). Controls which model `triton-resolve-model` provisions — does **not** restrict which models tritonserver loads (see `TRITON_MODEL_CONTROL_MODE`). Must not contain `/`, `\`, or be `.`/`..` |
 | `TRITON_MODEL_REPOSITORY` | _(required)_ | Base model repository path. Created automatically if missing |
 | `TRITON_MODEL_ID` | _(unset)_ | Explicit HuggingFace model ID (`org/repo`) for hf-hub source |
 | `TRITON_MODEL_ORG` | _(unset)_ | HF org prefix. Used to derive model ID as `$TRITON_MODEL_ORG/$TRITON_MODEL` |
-| `TRITON_MODEL_BACKEND` | _(unset)_ | Backend hint: `tensorrt`, `tensorrtllm`, `onnx`, `pytorch`, `tensorflow`, `python`, `vllm`. Restricts artifact validation |
+| `TRITON_MODEL_BACKEND` | _(unset)_ | Backend hint: `tensorrt`, `onnx`, `pytorch`, `tensorflow`, `python`, `vllm`. Restricts artifact validation |
 | `TRITON_MODEL_SOURCES` | `flox,local,r2,hf-hub` | Comma-separated source chain. Available: `flox`, `local`, `hf-cache`, `r2`, `hf-hub` |
-| `TRITON_LOCAL_MODELS` | _(unset)_ | Path to a directory of external TRT-LLM models. Each subdirectory should contain `engine/` and `tokenizer/`. Assembled as Tier 3 by `triton-setup-models`; ensemble pipelines are synthesized automatically |
 | `TRITON_MODEL_ENV_FILE` | _(derived)_ | Override env file path. Default: `$FLOX_ENV_CACHE/triton-model.<slug>.<hash>.env` |
 
 ### Server settings
@@ -940,7 +917,7 @@ backend is a subdirectory containing a shared library (`libtriton_<name>.so`).
 
 ### Built-from-source backends
 
-The server and compiled backends (Python, ONNX Runtime, TensorRT, TensorRT-LLM) are
+The server and compiled backends (Python, ONNX Runtime, TensorRT) are
 built from source (or extracted from NGC containers) via Nix expressions in a separate
 build repository ([build-triton-server](../builds/build-triton-server/)). The resulting
 packages are published to the `flox` Flox catalog and referenced in `manifest.toml`
@@ -953,11 +930,6 @@ triton-server.pkg-path = "flox/triton-server"
 triton-python-backend.pkg-path = "flox/triton-python-backend"
 triton-onnxruntime-backend.pkg-path = "flox/triton-onnxruntime-backend"
 triton-tensorrt-backend.pkg-path = "flox/triton-tensorrt-backend"
-triton-tensorrtllm-backend.pkg-path = "flox/triton-tensorrtllm-backend"
-
-# Model packages (optional — Tier 1 model discovery by triton-setup-models)
-triton-model-qwen2-5-05b-trtllm.pkg-path = "flox/triton-model-qwen2-5-05b-trtllm"
-triton-model-qwen2-5-05b-trtllm.pkg-group = "trtllm-models"
 ```
 
 ### Nixpkgs-provided packages
@@ -986,7 +958,7 @@ a unified backend directory at `$FLOX_ENV_CACHE/backends/`:
 
 - **Tier 1** (package-provided): Each subdirectory in `$FLOX_ENV/backends/` is symlinked
   wholesale into the cache. This covers compiled backends installed via the Flox catalog
-  (python, onnxruntime, tensorrt, tensorrtllm).
+  (python, onnxruntime, tensorrt).
 - **Tier 2** (repo-local): Each real directory in `$FLOX_ENV_PROJECT/backends/` that was
   not already handled by Tier 1 is assembled with per-file symlinks. Python-based backends
   (detected by the presence of `model.py` and absence of `libtriton_*.so`) automatically
@@ -1004,16 +976,11 @@ var setup is needed.
 | Python | `flox/triton-python-backend` | `backends/python/libtriton_python.so` |
 | ONNX Runtime | `flox/triton-onnxruntime-backend` | `backends/onnxruntime/libtriton_onnxruntime.so` |
 | TensorRT | `flox/triton-tensorrt-backend` | `backends/tensorrt/libtriton_tensorrt.so` |
-| TensorRT-LLM | `flox/triton-tensorrtllm-backend` | `backends/tensorrtllm/libtriton_tensorrtllm.so` |
 | vLLM | (pure Python, repo-local) | `backends/vllm/model.py` + Python backend stub |
 
 The ONNX Runtime backend loads `libonnxruntime.so` (ORT 1.24.2) from its Nix store
 RPATH automatically -- no need to copy ORT libraries into the backend directory.
-The TensorRT backend similarly loads the TRT SDK via RPATH. The TensorRT-LLM backend
-bundles its own runtime libraries (TRT-LLM, CUDA 13.x, NCCL) with `$ORIGIN`-relative
-RPATHs for SONAME isolation from the system's CUDA 12.x. The TRT-LLM backend also
-requires MPI — the on-activate hook auto-resolves `OPAL_PREFIX` from the backend's
-`hpcx/ompi/` directory and prepends its `lib/` to `LD_LIBRARY_PATH`.
+The TensorRT backend similarly loads the TRT SDK via RPATH.
 
 ### Model directory setup
 
@@ -1022,36 +989,11 @@ package), which runs during `flox activate` alongside `triton-setup-backends`. I
 a model directory at `$FLOX_ENV_CACHE/models/`:
 
 - **Tier 1** (package-provided): Each model directory under `$FLOX_ENV/share/models/` is
-  copied into the cache. These are Nix-store model packages (e.g.,
-  `triton-model-qwen2-5-05b-trtllm`) installed via the Flox catalog. If a model contains
-  `config.pbtxt.template`, token placeholders are expanded and the result is written as
-  `config.pbtxt`.
+  copied into the cache. These are Nix-store model packages installed via the Flox catalog.
+  If a model contains `config.pbtxt.template`, token placeholders are expanded and the
+  result is written as `config.pbtxt`.
 - **Tier 2** (repo-local): Each directory in `$FLOX_ENV_PROJECT/models/` that was not
   already handled by Tier 1 is symlinked into the cache.
-- **Tier 3** (external local): Each directory under `$TRITON_LOCAL_MODELS/` that was not
-  already handled by Tier 1 or Tier 2 is assembled into the cache. Intended for TRT-LLM
-  models with pre-built engines stored outside the repo.
-
-**Template token expansion**: `config.pbtxt.template` files support four tokens:
-
-| Token | Expanded to |
-|-------|-------------|
-| `@EXECUTOR_WORKER_PATH@` | `$TRITON_BACKEND_DIR/tensorrtllm/trtllmExecutorWorker` |
-| `@GPT_MODEL_PATH@` | `$FLOX_ENV_CACHE/models/<name>/engine` |
-| `@TOKENIZER_DIR@` | `$FLOX_ENV_CACHE/models/<name>/tokenizer` |
-| `@MODEL_NAME@` | Model directory name (e.g., `my_llm_trtllm`) |
-
-**TRT-LLM ensemble synthesis**: After all tiers are assembled, `triton-setup-models`
-checks each model for ensemble synthesis eligibility. A model qualifies if it has an
-`engine/` directory but no sibling `_preprocessing` directory. For qualifying models,
-three directories are synthesized from templates bundled in the `triton-server` package:
-
-- `{name}_preprocessing/` — tokenizer (Python backend)
-- `{name}_postprocessing/` — detokenizer (Python backend)
-- `{name}_ensemble/` — BLS orchestrator with streaming support
-
-The raw model also gets a `config.pbtxt` and `1/` version directory if missing. Synthesis
-is skipped for models that already ship with an ensemble (e.g., Tier 1 packages).
 
 The hook exports `TRITON_MODEL_REPOSITORY` pointing to the assembled model directory
 if model packages are present.
@@ -1218,15 +1160,10 @@ triton-runtime/
   #   python/       -> $FLOX_ENV/backends/python/        (Tier 1, from catalog)
   #   onnxruntime/  -> $FLOX_ENV/backends/onnxruntime/   (Tier 1, from catalog)
   #   tensorrt/     -> $FLOX_ENV/backends/tensorrt/      (Tier 1, from catalog)
-  #   tensorrtllm/  -> $FLOX_ENV/backends/tensorrtllm/   (Tier 1, from catalog)
   #   vllm/         -> per-file symlinks + python stub   (Tier 2, assembled)
   # At activation, triton-setup-models assembles $FLOX_ENV_CACHE/models/:
-  #   phi4_mini_trtllm/*          -> Tier 1 (from catalog, with ensemble)
+  #   phi4_mini_instruct/         -> Tier 2 (symlinked from $FLOX_ENV_PROJECT/models/)
   #   vllm_test/                  -> Tier 2 (symlinked from $FLOX_ENV_PROJECT/models/)
-  #   my_model_trtllm/            -> Tier 3 (from $TRITON_LOCAL_MODELS/)
-  #   my_model_trtllm_preprocessing/  -> synthesized from trtllm-templates
-  #   my_model_trtllm_postprocessing/ -> synthesized from trtllm-templates
-  #   my_model_trtllm_ensemble/       -> synthesized from trtllm-templates
   scripts/                      # Runtime script sources (also bundled in triton-server package)
     _lib.sh                     # Shared library sourced by the other scripts
     triton-preflight            # Pre-flight validation
@@ -1243,10 +1180,10 @@ triton-runtime/
       config.pbtxt
       1/
         model.json
-    qwen2_5_05b/                # Qwen2.5-0.5B via Python backend (transformers)
+    phi4_mini_instruct/         # Phi-4-mini-instruct via vLLM backend (default model)
       config.pbtxt
       1/
-        model.py
+        model.json
     onnx_identity/              # ONNX identity test model
       config.pbtxt
       1/
